@@ -24,7 +24,7 @@ kubectl create rolebinding jenkins-agent-admin \
   --clusterrole=admin \
   --serviceaccount=jenkins:jenkins-agent pour acceder à tous les namespaces
 
-3. Add this line :       serviceAccountName: jenkins  # ← Ajoute/modifie cette ligne
+3. Add this line :       serviceAccountName: jenkins
 under the spec in the jenkins deployment
 
 4. Ensuite plus d'info dans le jenkinsfile
