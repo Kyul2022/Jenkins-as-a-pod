@@ -1,59 +1,110 @@
-# Instructions to install Jenkins in k8s
-# First of all it's a good practice to create a specific namespace for it, where everything related to Jenkins
-# such as pods, services, volumes will be stored.
-kubectl create namespace jenkins"
+# Jenkins as a pod on Kubernetes
 
-# Next we'll create the deployment yaml file for Jenkins
-"nano jenkins.yaml"
+This guide walks through running Jenkins on Kubernetes, giving it permission to manage its own pods via a `ServiceAccount`, and using the Kubernetes plugin so Jenkins can spin up ephemeral agent pods for CI/CD.
 
-Vu qu'il faut que Jenkins cree des pods et les manage via le k8s api, il faut donc donner au pod de Jenkins
-le droit de manager des pods k8s, (le pod et le container jenkins vont partager les mêmes permissions)
+## 1. Create a dedicated namespace
 
-Et la façon pro de faire ca c est de use les service aacounts. Donc on va modifier notre deployment jenkins
-et lui accorder un service account rattaché à la permission clusterRole admin.
+Good practice: keep everything related to Jenkins (pods, services, volumes) isolated in its own namespace.
 
-1. Creer le serviceaccount : kubectl create serviceaccount jenkins-agent -n jenkins
-2. Faire le lien entre le role (il y a des roles predefini et le serviceaccoutn) :
+```bash
+kubectl create namespace jenkins
+```
+
+## 2. Create the deployment
+
+Create the deployment manifest:
+
+```bash
+nano jenkins.yaml
+```
+
+This will define the Jenkins pod, its container image, ports, and (later) its volume and service account.
+
+## 3. Grant Jenkins permission to manage pods (ServiceAccount)
+
+Since Jenkins needs to create and manage pods through the Kubernetes API, its pod needs the right permissions. The pod and the Jenkins container inside it share the same permissions, so the clean, production-grade way to do this is through a `ServiceAccount` bound to a `ClusterRole`.
+
+### 3.1 Create the ServiceAccount
+
+```bash
+kubectl create serviceaccount jenkins-agent -n jenkins
+```
+
+### 3.2 Bind it to a role
+
+Kubernetes ships with predefined roles (like `admin`). Bind the ServiceAccount to one:
+
+**Namespace-scoped** (access limited to the `jenkins` namespace):
+
+```bash
 kubectl create rolebinding jenkins-agent-admin \
   --clusterrole=admin \
   --serviceaccount=jenkins:jenkins-agent \
   --namespace=jenkins
+```
 
-  ou bien 
-  kubectl create clusterrolebinding jenkins-agent-admin \
+**Cluster-scoped** (access across all namespaces):
+
+```bash
+kubectl create clusterrolebinding jenkins-agent-admin \
   --clusterrole=admin \
-  --serviceaccount=jenkins:jenkins-agent pour acceder à tous les namespaces
+  --serviceaccount=jenkins:jenkins-agent
+```
 
-3. Add this line :       serviceAccountName: jenkins
-under the spec in the jenkins deployment
+### 3.3 Attach the ServiceAccount to the deployment
 
-4. Ensuite plus d'info dans le jenkinsfile
+In the `jenkins.yaml` deployment, add the following under `spec`:
 
-5. Creer un secret sur k8s avec les cred de docker Hub car les agents pods sont temporaires, il faut stocker 
-l'image resultante quelque part.
+```yaml
+serviceAccountName: jenkins
+```
 
-Creer le secret par commande (pas par fichier)
----
+More configuration details will come later in the Jenkinsfile.
+
+## 4. Store Docker Hub credentials as a secret
+
+Agent pods are ephemeral, so the resulting image needs to be pushed somewhere persistent. Create a secret holding the Docker Hub credentials (via command, not a file, to avoid leaking secrets in version control):
+
+```bash
 kubectl create secret docker-registry docker-creds \
   --docker-server=https://index.docker.io/v1/ \
-  --docker-username=username\
-  --docker-password=pwd \
-  --docker-email=mail \
+  --docker-username=<username> \
+  --docker-password=<password> \
+  --docker-email=<email> \
   -n jenkins
+```
 
-  docker-registry est un type special de secret dans k8s
-  https://index.docker.io/v1/ c'est l'adresse du registry, hub.docker.com c'est juste pour le portail
+Notes:
+- `docker-registry` is a special Kubernetes secret type made for this exact use case.
+- `https://index.docker.io/v1/` is the actual registry endpoint — `hub.docker.com` is just the web portal.
 
-  6. Monter le secret dans l'agent, comme fichier de configuration
+This secret is later mounted into the agent pod as a configuration file so it can push images.
 
+## 5. Persistent storage for the Jenkins pod
 
-  ---------------------------------
-  Etapes pour le ci cd k8s avec Jenkins
-  Il s'agira d'utiliser k8s comme plugin pour permettre à Jenkins d'utiliser des pods ephemères de k8s comme agents
-  Et par la suite deployer l'app sur le même cluster.
+Jenkins needs a volume to persist its data (jobs, config, plugins) across restarts.
 
-  1. On a commencé par installer Jenkins comme un pod, avec son deployment et son service. On a exposé deux ports
-  mais on en avait pas besoin car le supposé port 5000 est legacy.
-  Au pod de Jenkins on a grephé un volume. Ca commence par la creation d'un persistance volume claim. Où tu precises la taille et le type de stockage dont tu as besoin. Ensuite tu peux creer un volume correspondant à ce pvc, ou ne rien faire car si k8s voit qu'il n'ya pas de volumes avec ces features, il va en créér un.
-  Donc dans le deployment, sous la section containers où tu precises l'image de Jenkins, ajouter une section qui precise e volume qui sera monté sur le pod, en utilisant "VolumeMount" :
-  "# Jenkins-as-a-pod" 
+1. Create a `PersistentVolumeClaim` (PVC), specifying the size and storage class you need.
+2. You can create a matching `PersistentVolume` yourself, or let Kubernetes provision one automatically if none match the PVC's requirements.
+3. In the deployment, under the container section where the Jenkins image is defined, add a `volumeMounts` entry pointing to the volume backed by the PVC.
+
+## 6. Kubernetes plugin for dynamic agents
+
+Install the Kubernetes plugin in Jenkins so it can use ephemeral Kubernetes pods as build agents instead of static agents. Once configured, Jenkins will:
+
+1. Spin up a temporary pod as a build agent when a job runs.
+2. Run the build/test/package steps inside that pod.
+3. Push the resulting image to Docker Hub using the mounted credentials.
+4. Tear down the agent pod once the job completes.
+5. Optionally deploy the application back onto the same cluster.
+
+## Summary
+
+| Component | Purpose |
+|---|---|
+| `jenkins` namespace | Isolates all Jenkins-related resources |
+| Jenkins deployment + service | Runs Jenkins itself as a pod |
+| PVC + volume | Persists Jenkins data across restarts |
+| ServiceAccount + RoleBinding/ClusterRoleBinding | Lets Jenkins create/manage pods via the Kubernetes API |
+| `docker-creds` secret | Lets ephemeral agent pods push images to Docker Hub |
+| Kubernetes plugin | Lets Jenkins use ephemeral pods as CI/CD agents |
